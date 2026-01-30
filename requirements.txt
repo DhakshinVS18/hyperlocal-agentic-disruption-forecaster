@@ -1,0 +1,13 @@
+pandas
+numpy
+scikit-learn
+xgboost
+prophet
+langchain
+langchain-community
+langchain-huggingface
+transformers
+huggingface_hub
+streamlit
+faker
+pyngrok
