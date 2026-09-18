@@ -38,6 +38,12 @@
   }
   header .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
   header .subtitle { color: var(--text-dim); font-size: 13px; }
+  .mode-toggle { display: flex; gap: 4px; margin-left: 20px; background: var(--panel-2); border-radius: 5px; padding: 3px; }
+  .mode-btn { padding: 5px 12px; font-size: 12px; border-radius: 4px; cursor: pointer; color: var(--text-dim); border: none; background: none; font-family: 'Inter', sans-serif; }
+  .mode-btn.active { background: var(--accent); color: #05171a; font-weight: 600; }
+  .rain-input { margin-left: 12px; display: none; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+  .rain-input input { width: 55px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 6px; font-family: 'IBM Plex Mono', monospace; }
+  .live-banner { background: rgba(58,198,217,0.08); border: 1px solid var(--accent); border-radius: 6px; padding: 10px 16px; font-size: 12px; color: var(--accent); margin-bottom: 16px; }
   header .status {
     margin-left: auto;
     font-size: 12px;
@@ -186,6 +192,14 @@
 <header>
   <span class="title">DeliveryGuard</span>
   <span class="subtitle">Operations Console — Disruption Prediction &amp; Mitigation</span>
+  <div class="mode-toggle">
+    <button class="mode-btn active" id="btn-historical" onclick="setMode('historical')">Test Set</button>
+    <button class="mode-btn" id="btn-live" onclick="setMode('live')">Live (current hour)</button>
+  </div>
+  <div class="rain-input" id="rain-input">
+    <span>Rain (mm/hr):</span>
+    <input type="number" id="rain-value" value="0" min="0" max="80" onchange="if(currentZone) fetchLive(currentZone)">
+  </div>
   <span class="status"><span class="dot"></span><span id="conn-status">connecting...</span></span>
 </header>
 
@@ -193,7 +207,7 @@
   <aside class="sidebar">
     <h3>ZONES</h3>
     <div class="zone-list" id="zone-list"></div>
-    <h3 id="snapshot-heading" style="display:none;">HIGH-RISK SNAPSHOTS</h3>
+    <h3 id="snapshot-heading" style="display:none;">SAMPLE HOURS (TEST SET)</h3>
     <div class="snapshot-list" id="snapshot-list"></div>
   </aside>
 
@@ -207,6 +221,28 @@ const API_BASE = "http://127.0.0.1:8000"; // change if running the API elsewhere
 
 let currentZone = null;
 let currentRowIdx = null;
+let mode = "historical";
+
+function setMode(m) {
+  mode = m;
+  document.getElementById("btn-historical").classList.toggle("active", m === "historical");
+  document.getElementById("btn-live").classList.toggle("active", m === "live");
+  document.getElementById("rain-input").style.display = m === "live" ? "flex" : "none";
+  document.getElementById("snapshot-heading").style.display = m === "live" ? "none" : (currentZone ? "block" : "none");
+  document.getElementById("snapshot-list").style.display = m === "live" ? "none" : "flex";
+  if (currentZone) {
+    if (m === "live") fetchLive(currentZone);
+    else selectZone(currentZone);
+  }
+}
+
+async function fetchLive(zoneId) {
+  const rain = document.getElementById("rain-value").value || 0;
+  document.getElementById("main-content").innerHTML = `<div class="loading">Generating live snapshot for current hour...</div>`;
+  const res = await fetch(`${API_BASE}/live?zone_id=${zoneId}&rainfall_mm=${rain}`);
+  const data = await res.json();
+  renderAnalysis(data, true);
+}
 
 async function init() {
   try {
@@ -233,6 +269,13 @@ async function selectZone(zoneId) {
   currentZone = zoneId;
   document.querySelectorAll(".zone-item").forEach(el => el.classList.toggle("active", el.dataset.zone === zoneId));
 
+  if (mode === "live") {
+    fetchLive(zoneId);
+    return;
+  }
+
+  document.getElementById("snapshot-heading").style.display = "block";
+  document.getElementById("snapshot-list").style.display = "flex";
   const res = await fetch(`${API_BASE}/snapshots?zone_id=${zoneId}&limit=15`);
   const snapshots = await res.json();
 
@@ -271,10 +314,12 @@ function riskColor(prob) {
   return "var(--risk-low)";
 }
 
-function renderAnalysis(d) {
+function renderAnalysis(d, isLive) {
   const riskPct = Math.round(d.prediction.risk_probability * 100);
   const dt = new Date(d.timestamp);
-  const dtLabel = dt.toLocaleString(undefined, {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  const dtLabel = isLive
+    ? dt.toLocaleString(undefined, {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) + " (now)"
+    : dt.toLocaleString(undefined, {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
 
   const maxShap = Math.max(...d.explanation.map(e => Math.abs(e.shap_value)));
   const shapRows = d.explanation.map(e => {
@@ -301,6 +346,7 @@ function renderAnalysis(d) {
   const showSim = s.risk_before !== s.risk_after;
 
   document.getElementById("main-content").innerHTML = `
+    ${isLive ? `<div class="live-banner">● LIVE MODE — generated for the current hour (${dtLabel}) using the same causal model as the training data. No real live weather/traffic/order feed is connected; adjust rainfall above to test scenarios.</div>` : ''}
     <div class="grid-top">
       <div class="panel">
         <h2>PREDICTED DISRUPTION RISK — NEXT HOUR</h2>
@@ -308,7 +354,7 @@ function renderAnalysis(d) {
           <div class="risk-number" style="color:${riskColor(d.prediction.risk_probability)}">${riskPct}%</div>
           <div class="risk-meta">
             <div class="risk-label">${d.prediction.risk_level.toUpperCase()} RISK</div>
-            <div class="risk-label" style="color:var(--text-faint)">${d.actual_disruption ? 'Actually disrupted (test set)' : 'Actually fine (test set)'}</div>
+            <div class="risk-label" style="color:var(--text-faint)">${isLive ? 'Live simulated — no ground truth yet' : (d.actual_disruption ? 'Actually disrupted (test set)' : 'Actually fine (test set)')}</div>
           </div>
         </div>
         <div class="zone-meta">${d.zone_name} (${d.zone_id}) · ${dtLabel}</div>
