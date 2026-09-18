@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeliveryGuard — Operations Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d1014;
+    --panel: #14181f;
+    --panel-2: #1a1f28;
+    --border: #262c37;
+    --text: #e4e7eb;
+    --text-dim: #8a93a3;
+    --text-faint: #545c6b;
+    --accent: #3ac6d9;
+    --risk-low: #3ecf8e;
+    --risk-mod: #e8b339;
+    --risk-high: #e5484d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+  }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 28px;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  header .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  header .subtitle { color: var(--text-dim); font-size: 13px; }
+  header .status {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-faint);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--risk-low); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: calc(100vh - 60px);
+  }
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .sidebar {
+    border-right: 1px solid var(--border);
+    padding: 20px 16px;
+  }
+  .sidebar h3 {
+    font-size: 11px;
+    color: var(--text-faint);
+    font-weight: 500;
+    margin-bottom: 10px;
+    letter-spacing: 0.02em;
+  }
+  .zone-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 24px; }
+  .zone-item {
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+  }
+  .zone-item:hover { background: var(--panel-2); color: var(--text); }
+  .zone-item.active {
+    background: var(--panel-2);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  .zone-item .tier { font-size: 10px; color: var(--text-faint); }
+
+  .snapshot-list { display: flex; flex-direction: column; gap: 2px; max-height: 340px; overflow-y: auto; }
+  .snap-item {
+    padding: 7px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--text-dim);
+  }
+  .snap-item:hover { background: var(--panel-2); }
+  .snap-item.active { background: var(--panel-2); color: var(--text); }
+  .risk-chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+
+  main { padding: 28px; }
+  .empty-state {
+    color: var(--text-faint);
+    font-size: 14px;
+    padding: 60px 20px;
+    text-align: center;
+  }
+
+  .grid-top {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 900px) { .grid-top { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 20px;
+  }
+  .panel h2 {
+    font-size: 12px;
+    color: var(--text-faint);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    margin-bottom: 14px;
+  }
+
+  .risk-display { display: flex; align-items: center; gap: 20px; }
+  .risk-number { font-size: 44px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; line-height: 1; }
+  .risk-meta { display: flex; flex-direction: column; gap: 4px; }
+  .risk-label { font-size: 13px; color: var(--text-dim); }
+  .zone-meta { font-size: 12px; color: var(--text-faint); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+  .state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  .state-item { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
+  .state-item .label { color: var(--text-dim); }
+  .state-item .value { font-family: 'IBM Plex Mono', monospace; }
+
+  .shap-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .shap-row:last-child { border-bottom: none; }
+  .shap-feature { flex: 1; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
+  .shap-bar-track { width: 90px; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+  .shap-bar-fill { height: 100%; background: var(--risk-high); }
+  .shap-val { width: 50px; text-align: right; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-faint); }
+
+  .action-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--panel-2);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+  .rationale { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+
+  .sim-compare { display: flex; align-items: center; gap: 20px; margin-top: 16px; }
+  .sim-box { flex: 1; text-align: center; padding: 14px; background: var(--panel-2); border-radius: 6px; }
+  .sim-box .sim-label { font-size: 11px; color: var(--text-faint); margin-bottom: 6px; }
+  .sim-box .sim-val { font-size: 24px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+  .sim-arrow { color: var(--text-faint); font-size: 18px; }
+  .sim-note { font-size: 11px; color: var(--text-faint); margin-top: 12px; font-style: italic; }
+
+  .loading { color: var(--text-faint); font-size: 13px; padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="title">DeliveryGuard</span>
+  <span class="subtitle">Operations Console — Disruption Prediction &amp; Mitigation</span>
+  <span class="status"><span class="dot"></span><span id="conn-status">connecting...</span></span>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <h3>ZONES</h3>
+    <div class="zone-list" id="zone-list"></div>
+    <h3 id="snapshot-heading" style="display:none;">HIGH-RISK SNAPSHOTS</h3>
+    <div class="snapshot-list" id="snapshot-list"></div>
+  </aside>
+
+  <main id="main-content">
+    <div class="empty-state">Select a zone to view predicted disruption risk, explanation, and recommended action.</div>
+  </main>
+</div>
+
+<script>
+const API_BASE = "http://127.0.0.1:8000"; // change if running the API elsewhere
+
+let currentZone = null;
+let currentRowIdx = null;
+
+async function init() {
+  try {
+    const res = await fetch(`${API_BASE}/zones`);
+    const zones = await res.json();
+    document.getElementById("conn-status").textContent = "connected";
+    renderZoneList(zones);
+  } catch (e) {
+    document.getElementById("conn-status").textContent = "API unreachable — start uvicorn on :8000";
+  }
+}
+
+function renderZoneList(zones) {
+  const el = document.getElementById("zone-list");
+  el.innerHTML = zones.map(z => `
+    <div class="zone-item" data-zone="${z.zone_id}" onclick="selectZone('${z.zone_id}')">
+      <span>${z.zone_name}</span>
+      <span class="tier">${z.distance_tier}</span>
+    </div>
+  `).join("");
+}
+
+async function selectZone(zoneId) {
+  currentZone = zoneId;
+  document.querySelectorAll(".zone-item").forEach(el => el.classList.toggle("active", el.dataset.zone === zoneId));
+
+  const res = await fetch(`${API_BASE}/snapshots?zone_id=${zoneId}&limit=15`);
+  const snapshots = await res.json();
+
+  const heading = document.getElementById("snapshot-heading");
+  heading.style.display = "block";
+  const list = document.getElementById("snapshot-list");
+  list.innerHTML = snapshots.map(s => {
+    const dt = new Date(s.timestamp);
+    const label = dt.toLocaleDateString(undefined, {month:'short', day:'numeric'}) + " " + dt.getHours() + ":00";
+    const pct = Math.round(s.predicted_prob * 100);
+    const riskClass = pct >= 70 ? 'high' : pct >= 30 ? 'mod' : 'low';
+    return `
+      <div class="snap-item" data-row="${s.row_idx}" onclick="analyze(${s.row_idx})">
+        <span>${label}</span>
+        <span class="risk-chip" style="color:var(--risk-${riskClass});background:var(--panel-2);">${pct}%</span>
+      </div>
+    `;
+  }).join("");
+
+  if (snapshots.length > 0) analyze(snapshots[0].row_idx);
+}
+
+async function analyze(rowIdx) {
+  currentRowIdx = rowIdx;
+  document.querySelectorAll(".snap-item").forEach(el => el.classList.toggle("active", parseInt(el.dataset.row) === rowIdx));
+
+  document.getElementById("main-content").innerHTML = `<div class="loading">Analyzing...</div>`;
+  const res = await fetch(`${API_BASE}/analyze?row_idx=${rowIdx}`);
+  const data = await res.json();
+  renderAnalysis(data);
+}
+
+function riskColor(prob) {
+  if (prob >= 0.7) return "var(--risk-high)";
+  if (prob >= 0.3) return "var(--risk-mod)";
+  return "var(--risk-low)";
+}
+
+function renderAnalysis(d) {
+  const riskPct = Math.round(d.prediction.risk_probability * 100);
+  const dt = new Date(d.timestamp);
+  const dtLabel = dt.toLocaleString(undefined, {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+
+  const maxShap = Math.max(...d.explanation.map(e => Math.abs(e.shap_value)));
+  const shapRows = d.explanation.map(e => {
+    const pct = Math.max(4, Math.round((Math.abs(e.shap_value) / maxShap) * 100));
+    const color = e.shap_value > 0 ? "var(--risk-high)" : "var(--risk-low)";
+    return `
+      <div class="shap-row">
+        <span class="shap-feature">${e.feature}</span>
+        <div class="shap-bar-track"><div class="shap-bar-fill" style="width:${pct}%;background:${color};"></div></div>
+        <span class="shap-val">${e.shap_value > 0 ? '+' : ''}${e.shap_value.toFixed(2)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const actionLabels = {
+    rebalance_riders: "Rebalance Riders",
+    reposition_inventory: "Reposition Inventory",
+    reroute_traffic: "Reroute Traffic",
+    alert_ops: "Alert Operations",
+    no_action: "No Action Needed",
+  };
+
+  const s = d.simulation;
+  const showSim = s.risk_before !== s.risk_after;
+
+  document.getElementById("main-content").innerHTML = `
+    <div class="grid-top">
+      <div class="panel">
+        <h2>PREDICTED DISRUPTION RISK — NEXT HOUR</h2>
+        <div class="risk-display">
+          <div class="risk-number" style="color:${riskColor(d.prediction.risk_probability)}">${riskPct}%</div>
+          <div class="risk-meta">
+            <div class="risk-label">${d.prediction.risk_level.toUpperCase()} RISK</div>
+            <div class="risk-label" style="color:var(--text-faint)">${d.actual_disruption ? 'Actually disrupted (test set)' : 'Actually fine (test set)'}</div>
+          </div>
+        </div>
+        <div class="zone-meta">${d.zone_name} (${d.zone_id}) · ${dtLabel}</div>
+      </div>
+
+      <div class="panel">
+        <h2>CURRENT OPERATIONAL STATE</h2>
+        <div class="state-grid">
+          <div class="state-item"><span class="label">Orders</span><span class="value">${d.current_state.current_orders}</span></div>
+          <div class="state-item"><span class="label">Available riders</span><span class="value">${d.current_state.available_riders}</span></div>
+          <div class="state-item"><span class="label">Capacity gap</span><span class="value">${d.current_state.capacity_gap}</span></div>
+          <div class="state-item"><span class="label">Congestion</span><span class="value">${d.current_state.congestion_pct}%</span></div>
+          <div class="state-item"><span class="label">Rainfall</span><span class="value">${d.current_state.current_rainfall}mm</span></div>
+          <div class="state-item"><span class="label">Inventory</span><span class="value">${d.current_state.inventory_level}%</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-top">
+      <div class="panel">
+        <h2>WHY — TOP CONTRIBUTING FACTORS (SHAP)</h2>
+        ${shapRows}
+      </div>
+
+      <div class="panel">
+        <h2>RECOMMENDED ACTION</h2>
+        <div class="action-badge">${actionLabels[d.recommendation.action] || d.recommendation.action}</div>
+        <div class="rationale">${d.recommendation.rationale}</div>
+
+        ${showSim ? `
+          <div class="sim-compare">
+            <div class="sim-box">
+              <div class="sim-label">BEFORE</div>
+              <div class="sim-val" style="color:${riskColor(s.risk_before)}">${Math.round(s.risk_before*100)}%</div>
+            </div>
+            <div class="sim-arrow">→</div>
+            <div class="sim-box">
+              <div class="sim-label">AFTER (SIMULATED)</div>
+              <div class="sim-val" style="color:${riskColor(s.risk_after)}">${Math.round(s.risk_after*100)}%</div>
+            </div>
+          </div>
+          <div class="sim-note">${s.note}</div>
+        ` : `<div class="sim-note" style="margin-top:16px;">No physical state change simulated for this action type.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+init();
+</script>
+
+</body>
+</html>
