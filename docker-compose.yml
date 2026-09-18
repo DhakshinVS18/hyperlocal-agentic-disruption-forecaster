@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/processed:/app/data/processed:ro
+    restart: unless-stopped
+
+  # Simple static file server for the dashboard — nginx serving dashboard/index.html.
+  # For local dev, opening dashboard/index.html directly in a browser also works
+  # (it talks to the api service via http://localhost:8000).
+  dashboard:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
