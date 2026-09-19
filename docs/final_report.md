@@ -75,3 +75,17 @@ Real data partnerships, multi-hour cascading simulation, an actual A/B-testable 
 ---
 
 *All results are from synthetic/public data. No real company data, proprietary benchmarks, or novelty claims beyond what's stated above.*
+
+---
+
+## 11. Post-Week-8 Additions
+
+After the initial 8-week build, three further improvements were added:
+
+**Plain-language narration.** Every prediction is now accompanied by a rule-based (not free-form LLM) natural-language summary — e.g. *"In Anna Nagar, expect a rider shortfall of about 28 riders around 10 PM Friday. This pushes disruption risk to 80%..."* Every sentence is templated directly from the pipeline's actual outputs (prediction, SHAP cause, current state), so it stays auditable and cannot state a fact that isn't already a real number from the model — consistent with the project's constrained-decision-engine philosophy.
+
+**Real weather and traffic integration (Live mode).** The dashboard's Live mode now fetches genuinely real current rainfall (OpenWeatherMap) and real current traffic congestion (TomTom) for actual Chennai coordinates, when API keys are configured, with a documented fallback to the synthetic causal model when they aren't. Order volume, rider availability, and inventory remain synthetic in all cases — this is a hard constraint, not a shortcut: no public API exposes real operational data for any quick-commerce platform (Swiggy, Zomato, Zepto, or otherwise), so any claim of "real" order/rider data would be false. The system is explicit about which of its three input categories (weather, traffic, operations) are real versus simulated at all times, both in the API response and the UI.
+
+**Expanded zone coverage.** Live mode now covers 22 real Chennai areas, versus the original 10 the model was trained and evaluated on. The 12 extended zones are explicitly flagged (in the UI and API) as being outside the model's original trained set — predictions for them use the model's general weather/traffic/distance-tier relationships without zone-specific calibration. The historical Test Set view — the one actual evaluation numbers in this report are based on — remains exactly the original 10 zones; expanding it would misrepresent what was actually validated.
+
+*These additions are demo/coverage improvements to the live system, not changes to the trained model or its Section 4–7 evaluation results above.*
