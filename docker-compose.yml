@@ -9,6 +9,9 @@ services:
       - "8000:8000"
     volumes:
       - ./data/processed:/app/data/processed:ro
+    environment:
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - TOMTOM_API_KEY=${TOMTOM_API_KEY}
     restart: unless-stopped
 
   # Simple static file server for the dashboard — nginx serving dashboard/index.html.

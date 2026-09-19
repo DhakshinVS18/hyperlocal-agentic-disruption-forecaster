@@ -51,6 +51,70 @@ model.load_model(os.path.join(DATA_DIR, "xgboost_model.json"))
 
 test = pd.read_csv(os.path.join(DATA_DIR, "test_predictions.csv"), parse_dates=["timestamp"])
 tier_map = {"short": 0, "medium": 1, "long": 2}
+zone_names_map = {"Z01": "Ambattur", "Z02": "Anna Nagar", "Z03": "T Nagar", "Z04": "Velachery",
+                   "Z05": "Porur", "Z06": "Adyar", "Z07": "Tambaram", "Z08": "Guindy",
+                   "Z09": "Mylapore", "Z10": "Sholinganallur"}
+
+
+def describe_hour(hour: int) -> str:
+    if hour == 0: return "12 AM"
+    if hour < 12: return f"{hour} AM"
+    if hour == 12: return "12 PM"
+    return f"{hour - 12} PM"
+
+
+def generate_narrative(zone_name, timestamp, current_state, prediction, dominant_cause, decision, sim):
+    """
+    Rule-based natural-language narration — deliberately NOT a free-form LLM call.
+    Every sentence is templated from actual model outputs (prediction, SHAP-derived
+    cause, current state), so it stays auditable and reproducible, consistent with
+    the project's constrained-decision-engine philosophy. No fact is invented here
+    that isn't already a real number from the pipeline.
+    """
+    hour_label = describe_hour(timestamp.hour)
+    day_label = timestamp.strftime("%A")
+    risk_pct = round(prediction["risk_probability"] * 100)
+
+    # Lead sentence: conditions
+    condition_bits = []
+    if current_state["current_rainfall"] > 8:
+        condition_bits.append(f"heavy rain ({current_state['current_rainfall']}mm/hr)")
+    elif current_state["current_rainfall"] > 1:
+        condition_bits.append(f"light rain ({current_state['current_rainfall']}mm/hr)")
+    if current_state["congestion_pct"] > 60:
+        condition_bits.append(f"heavy traffic ({current_state['congestion_pct']}% congestion)")
+    elif current_state["congestion_pct"] > 40:
+        condition_bits.append(f"moderate traffic ({current_state['congestion_pct']}% congestion)")
+    if current_state["capacity_gap"] > 3:
+        condition_bits.append(f"a rider shortfall of about {round(current_state['capacity_gap'])} riders")
+
+    if condition_bits:
+        conditions_str = ", ".join(condition_bits[:-1]) + (" and " + condition_bits[-1] if len(condition_bits) > 1 else condition_bits[0])
+        lead = f"In {zone_name}, expect {conditions_str} around {hour_label} {day_label}."
+    else:
+        lead = f"In {zone_name}, conditions look normal around {hour_label} {day_label} — no significant rain, traffic, or rider stress detected."
+
+    # Risk sentence
+    if risk_pct >= 70:
+        risk_sent = f"This pushes disruption risk to {risk_pct}% — high confidence a delivery slowdown will happen this hour."
+    elif risk_pct >= 30:
+        risk_sent = f"This puts disruption risk at {risk_pct}% — worth watching, not yet critical."
+    else:
+        risk_sent = f"Disruption risk stays low at {risk_pct}% — deliveries should run normally."
+
+    # Action sentence
+    action_labels = {
+        "rebalance_riders": "moving extra riders into the zone",
+        "reposition_inventory": "repositioning inventory to this zone",
+        "reroute_traffic": "recommending alternate routing",
+        "alert_ops": "flagging this for operations to keep an eye on",
+        "no_action": "no action is needed right now",
+    }
+    action_sent = f"Recommended response: {action_labels.get(decision['action'], decision['action'])}."
+    if sim.get("risk_reduction", 0) > 0.01:
+        action_sent += f" Simulated impact: risk would drop from {round(sim['risk_before']*100)}% to {round(sim['risk_after']*100)}%."
+
+    return f"{lead} {risk_sent} {action_sent}"
 test["distance_tier_ordinal"] = test["distance_tier"].map(tier_map)
 zone_dummies = pd.get_dummies(test["zone_id"], prefix="zone")
 
@@ -76,20 +140,113 @@ print(f"DeliveryGuard API ready. {len(test):,} test zone-hours loaded, "
 # --- Static per-zone profile (used for live simulation, since there's no
 # real live weather/traffic/order feed to connect to for this project) ---
 import datetime as dt
+from zoneinfo import ZoneInfo
+import os
+import requests
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# --- Real API keys, read from environment (never hardcoded/committed) ---
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
+TOMTOM_API_KEY = os.environ.get("TOMTOM_API_KEY", "")
+
+# Approximate real coordinates for each zone (used to query real weather/traffic APIs)
+ZONE_COORDS = {
+    "Z01": (13.1143, 80.1548),  # Ambattur
+    "Z02": (13.0850, 80.2101),  # Anna Nagar
+    "Z03": (13.0418, 80.2341),  # T Nagar
+    "Z04": (12.9756, 80.2207),  # Velachery
+    "Z05": (13.0381, 80.1565),  # Porur
+    "Z06": (13.0012, 80.2565),  # Adyar
+    "Z07": (12.9249, 80.1000),  # Tambaram
+    "Z08": (13.0067, 80.2206),  # Guindy
+    "Z09": (13.0339, 80.2619),  # Mylapore
+    "Z10": (12.9010, 80.2279),  # Sholinganallur
+}
+
+
+def fetch_real_weather(lat, lon):
+    """Returns {'rainfall_mm': float, 'temperature': float, 'humidity': float, 'wind_speed': float} or None if unavailable."""
+    if not OPENWEATHER_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={"lat": lat, "lon": lon, "appid": OPENWEATHER_API_KEY, "units": "metric"},
+            timeout=4,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        rainfall = data.get("rain", {}).get("1h", 0.0)  # mm in last hour, 0 if not raining
+        return {
+            "rainfall_mm": float(rainfall),
+            "temperature": float(data["main"]["temp"]),
+            "humidity": float(data["main"]["humidity"]),
+            "wind_speed": float(data.get("wind", {}).get("speed", 0)) * 3.6,  # m/s -> km/h
+        }
+    except Exception:
+        return None
+
+
+def fetch_real_traffic(lat, lon):
+    """Returns {'congestion_pct': float, 'avg_speed': float} or None if unavailable."""
+    if not TOMTOM_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json",
+            params={"point": f"{lat},{lon}", "key": TOMTOM_API_KEY},
+            timeout=4,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()["flowSegmentData"]
+        current_speed = data["currentSpeed"]
+        free_flow_speed = max(data["freeFlowSpeed"], 1)
+        congestion_pct = max(0, min(100, (1 - current_speed / free_flow_speed) * 100))
+        return {"congestion_pct": float(congestion_pct), "avg_speed": float(current_speed)}
+    except Exception:
+        return None
 
 ZONE_PROFILE = {
-    "Z01": {"tier": "medium", "base_demand": 55, "base_riders": 32},
-    "Z02": {"tier": "short", "base_demand": 70, "base_riders": 41},
-    "Z03": {"tier": "short", "base_demand": 85, "base_riders": 49},
-    "Z04": {"tier": "medium", "base_demand": 60, "base_riders": 35},
-    "Z05": {"tier": "long", "base_demand": 40, "base_riders": 23},
-    "Z06": {"tier": "medium", "base_demand": 58, "base_riders": 34},
-    "Z07": {"tier": "long", "base_demand": 35, "base_riders": 20},
-    "Z08": {"tier": "short", "base_demand": 65, "base_riders": 38},
-    "Z09": {"tier": "short", "base_demand": 62, "base_riders": 36},
-    "Z10": {"tier": "long", "base_demand": 50, "base_riders": 29},
+    "Z01": {"tier": "medium", "base_demand": 55, "base_riders": 32, "name": "Ambattur"},
+    "Z02": {"tier": "short", "base_demand": 70, "base_riders": 41, "name": "Anna Nagar"},
+    "Z03": {"tier": "short", "base_demand": 85, "base_riders": 49, "name": "T Nagar"},
+    "Z04": {"tier": "medium", "base_demand": 60, "base_riders": 35, "name": "Velachery"},
+    "Z05": {"tier": "long", "base_demand": 40, "base_riders": 23, "name": "Porur"},
+    "Z06": {"tier": "medium", "base_demand": 58, "base_riders": 34, "name": "Adyar"},
+    "Z07": {"tier": "long", "base_demand": 35, "base_riders": 20, "name": "Tambaram"},
+    "Z08": {"tier": "short", "base_demand": 65, "base_riders": 38, "name": "Guindy"},
+    "Z09": {"tier": "short", "base_demand": 62, "base_riders": 36, "name": "Mylapore"},
+    "Z10": {"tier": "long", "base_demand": 50, "base_riders": 29, "name": "Sholinganallur"},
+    # --- Extended live-only coverage (NOT in the trained model's original zone set — see disclaimer) ---
+    "Z11": {"tier": "medium", "base_demand": 50, "base_riders": 29, "name": "Perambur"},
+    "Z12": {"tier": "short", "base_demand": 60, "base_riders": 35, "name": "Kodambakkam"},
+    "Z13": {"tier": "short", "base_demand": 65, "base_riders": 38, "name": "Vadapalani"},
+    "Z14": {"tier": "medium", "base_demand": 55, "base_riders": 32, "name": "Thiruvanmiyur"},
+    "Z15": {"tier": "long", "base_demand": 38, "base_riders": 22, "name": "Pallavaram"},
+    "Z16": {"tier": "long", "base_demand": 42, "base_riders": 24, "name": "Chromepet"},
+    "Z17": {"tier": "short", "base_demand": 68, "base_riders": 40, "name": "Nungambakkam"},
+    "Z18": {"tier": "short", "base_demand": 58, "base_riders": 34, "name": "Egmore"},
+    "Z19": {"tier": "medium", "base_demand": 52, "base_riders": 30, "name": "Perungudi"},
+    "Z20": {"tier": "long", "base_demand": 33, "base_riders": 19, "name": "Avadi"},
+    "Z21": {"tier": "long", "base_demand": 30, "base_riders": 17, "name": "Red Hills"},
+    "Z22": {"tier": "medium", "base_demand": 48, "base_riders": 28, "name": "Kolathur"},
 }
+ORIGINAL_TRAINED_ZONES = {"Z01","Z02","Z03","Z04","Z05","Z06","Z07","Z08","Z09","Z10"}
 TIER_MINUTES = {"short": 12, "medium": 18, "long": 28}
+
+ZONE_COORDS = {
+    "Z01": (13.1143, 80.1548), "Z02": (13.0850, 80.2101), "Z03": (13.0418, 80.2341),
+    "Z04": (12.9756, 80.2207), "Z05": (13.0381, 80.1565), "Z06": (13.0012, 80.2565),
+    "Z07": (12.9249, 80.1000), "Z08": (13.0067, 80.2206), "Z09": (13.0339, 80.2619),
+    "Z10": (12.9010, 80.2279),
+    "Z11": (13.1155, 80.2334), "Z12": (13.0500, 80.2200), "Z13": (13.0500, 80.2121),
+    "Z14": (12.9830, 80.2594), "Z15": (12.9675, 80.1491), "Z16": (12.9516, 80.1462),
+    "Z17": (13.0604, 80.2425), "Z18": (13.0732, 80.2609), "Z19": (12.9698, 80.2422),
+    "Z20": (13.1147, 80.0970), "Z21": (13.1899, 80.1836), "Z22": (13.1231, 80.2181),
+}
 
 
 def hour_demand_multiplier(hour):
@@ -106,23 +263,48 @@ def hour_traffic_base(hour):
     return 35
 
 
-def generate_live_snapshot(zone_id: str, rainfall_mm: float = 0.0):
+def generate_live_snapshot(zone_id: str, rainfall_mm_override: float = None):
     """
-    Generates a CURRENT zone-hour using real wall-clock time and the same
-    causal relationships as the training data generator, plus a
-    user-supplied rainfall estimate (since we have no live weather feed).
-    This is a live SIMULATION, not a live SENSOR feed — labeled as such
-    everywhere it's shown.
+    Generates a CURRENT zone-hour using real wall-clock time. Weather and
+    traffic are fetched from REAL APIs (OpenWeatherMap, TomTom) when API
+    keys are configured; otherwise falls back to the synthetic causal model
+    (or a manual override value), clearly labeled either way. Orders/riders/
+    inventory remain synthetic in all cases — no public API exposes real
+    quick-commerce operational data for any platform.
     """
-    now = dt.datetime.now()
+    now = dt.datetime.now(IST)
     hour = now.hour
     dow = now.weekday()
     is_weekend = int(dow >= 5)
     profile = ZONE_PROFILE[zone_id]
     tier = profile["tier"]
+    lat, lon = ZONE_COORDS[zone_id]
 
-    congestion = min(98, max(5, hour_traffic_base(hour) + rainfall_mm * 2.2 + np.random.normal(0, 5)))
-    avg_speed = np.clip(45 - congestion * 0.35, 5, 45)
+    data_sources = {"weather": "synthetic", "traffic": "synthetic"}
+
+    # --- Try REAL weather first ---
+    real_weather = fetch_real_weather(lat, lon)
+    if rainfall_mm_override is not None:
+        rainfall_mm = rainfall_mm_override
+        data_sources["weather"] = "manual_override"
+        temperature, humidity, wind_speed = 28.0, 65.0, 10.0
+    elif real_weather:
+        rainfall_mm = real_weather["rainfall_mm"]
+        temperature, humidity, wind_speed = real_weather["temperature"], real_weather["humidity"], real_weather["wind_speed"]
+        data_sources["weather"] = "live_openweathermap"
+    else:
+        rainfall_mm = 0.0
+        temperature, humidity, wind_speed = 28.0, 65.0, 10.0
+
+    # --- Try REAL traffic next ---
+    real_traffic = fetch_real_traffic(lat, lon)
+    if real_traffic:
+        congestion = real_traffic["congestion_pct"]
+        avg_speed = real_traffic["avg_speed"]
+        data_sources["traffic"] = "live_tomtom"
+    else:
+        congestion = min(98, max(5, hour_traffic_base(hour) + rainfall_mm * 2.2 + np.random.normal(0, 5)))
+        avg_speed = float(np.clip(45 - congestion * 0.35, 5, 45))
     travel_time_index = 1 + congestion / 60
 
     weekend_mult = 1.15 if is_weekend else 1.0
@@ -142,10 +324,10 @@ def generate_live_snapshot(zone_id: str, rainfall_mm: float = 0.0):
     row = {
         "zone_id": zone_id, "zone_name": zone_id, "distance_tier": tier,
         "timestamp": now,
-        "current_rainfall": rainfall_mm, "forecast_rainfall_1h": rainfall_mm,
-        "temperature": 28.0, "humidity": 65.0, "wind_speed": 10.0,
+        "current_rainfall": round(rainfall_mm, 2), "forecast_rainfall_1h": round(rainfall_mm, 2),
+        "temperature": round(temperature, 1), "humidity": round(humidity, 1), "wind_speed": round(wind_speed, 1),
         "rain_probability": min(100, rainfall_mm * 8),
-        "congestion_pct": congestion, "avg_speed": avg_speed, "travel_time_index": travel_time_index,
+        "congestion_pct": round(congestion, 1), "avg_speed": round(avg_speed, 1), "travel_time_index": travel_time_index,
         "current_orders": current_orders, "recent_orders_2h": current_orders * 2,
         "expected_next_hour_orders": expected_orders,
         "historical_avg_demand": profile["base_demand"] * hour_demand_multiplier(hour),
@@ -164,22 +346,23 @@ def generate_live_snapshot(zone_id: str, rainfall_mm: float = 0.0):
         "is_peak_hour": int((12 <= hour <= 14) or (19 <= hour <= 22)),
         "distance_tier_ordinal": tier_map[tier],
     }
-    return row
+    return row, data_sources
 
 
 @app.get("/live")
-def live_analyze(zone_id: str = Query(...), rainfall_mm: float = Query(0.0, description="Current rainfall estimate in mm/hr")):
+def live_analyze(zone_id: str = Query(...), rainfall_mm: float = Query(None, description="Manual rainfall override in mm/hr — omit to use real weather API when configured")):
     """
-    Live mode: generates a snapshot for the ACTUAL current hour (your PC's
-    real clock) using the same causal model as training data, then runs
-    the full predict->explain->decide->simulate pipeline on it.
-    NOT a real sensor feed — there is no live weather/traffic/order API
-    connected. rainfall_mm lets you manually set current conditions.
+    Live mode: uses REAL current weather (OpenWeatherMap) and REAL current
+    traffic (TomTom) when API keys are configured in the environment;
+    otherwise falls back to the synthetic causal model. Orders/riders/
+    inventory are always synthetic — no public API exposes real
+    quick-commerce operational data for any platform (Swiggy/Zomato/Zepto
+    etc. do not publish this).
     """
     if zone_id not in ZONE_PROFILE:
         raise HTTPException(status_code=404, detail=f"Unknown zone {zone_id}")
 
-    row_dict = generate_live_snapshot(zone_id, rainfall_mm)
+    row_dict, data_sources = generate_live_snapshot(zone_id, rainfall_mm)
     row_df = pd.DataFrame([row_dict])
     zone_dummy_row = pd.get_dummies(row_df["zone_id"], prefix="zone").reindex(columns=zone_dummies.columns, fill_value=0)
     feature_row_df = pd.concat([row_df[BASE_FEATURES], zone_dummy_row], axis=1).astype(float)
@@ -196,20 +379,41 @@ def live_analyze(zone_id: str = Query(...), rainfall_mm: float = Query(0.0, desc
     decision = decide_action(predicted_prob, dominant_cause)
     sim = simulate_intervention(model, feature_row, decision["action"], FEATURE_COLS)
 
-    zone_names = {"Z01": "Ambattur", "Z02": "Anna Nagar", "Z03": "T Nagar", "Z04": "Velachery",
-                  "Z05": "Porur", "Z06": "Adyar", "Z07": "Tambaram", "Z08": "Guindy",
-                  "Z09": "Mylapore", "Z10": "Sholinganallur"}
+    zone_names = {zid: p["name"] for zid, p in ZONE_PROFILE.items()}
+    in_trained_set = zone_id in ORIGINAL_TRAINED_ZONES
+
+    current_state_dict = {
+        "current_orders": int(row_dict["current_orders"]),
+        "available_riders": int(row_dict["available_riders"]),
+        "capacity_gap": round(float(row_dict["capacity_gap"]), 1),
+        "congestion_pct": round(float(row_dict["congestion_pct"]), 1),
+        "current_rainfall": round(float(row_dict["current_rainfall"]), 1),
+        "inventory_level": round(float(row_dict["inventory_level"]), 1),
+    }
+    prediction_dict = {
+        "risk_probability": round(predicted_prob, 4),
+        "risk_level": "high" if predicted_prob >= 0.7 else "moderate" if predicted_prob >= 0.3 else "low",
+    }
+    narrative = generate_narrative(zone_names.get(zone_id, zone_id), row_dict["timestamp"], current_state_dict,
+                                    prediction_dict, dominant_cause, decision, sim)
+
+    zone_note = "" if in_trained_set else " This zone is outside the model's original trained set (Weeks 2–6 covered 10 core zones) — prediction uses the model's general weather/traffic/distance-tier logic without zone-specific calibration."
 
     return {
         "mode": "live_simulated",
-        "disclaimer": "Generated for the current real-world hour using the same causal model as training data. No live weather/traffic/order feed is connected in this portfolio version.",
+        "in_trained_set": in_trained_set,
+        "data_sources": data_sources,
+        "disclaimer": (
+            f"Weather: {'REAL (OpenWeatherMap)' if data_sources['weather']=='live_openweathermap' else 'manual override' if data_sources['weather']=='manual_override' else 'synthetic (no API key configured)'}. "
+            f"Traffic: {'REAL (TomTom)' if data_sources['traffic']=='live_tomtom' else 'synthetic (no API key configured)'}. "
+            "Orders/riders/inventory are always synthetic — no public API exposes real quick-commerce operational data for any platform."
+            f"{zone_note}"
+        ),
         "zone_id": zone_id,
         "zone_name": zone_names.get(zone_id, zone_id),
         "timestamp": row_dict["timestamp"].isoformat(),
-        "prediction": {
-            "risk_probability": round(predicted_prob, 4),
-            "risk_level": "high" if predicted_prob >= 0.7 else "moderate" if predicted_prob >= 0.3 else "low",
-        },
+        "prediction": prediction_dict,
+        "narrative": narrative,
         "explanation": explanation,
         "dominant_cause": dominant_cause,
         "recommendation": decision,
@@ -219,14 +423,7 @@ def live_analyze(zone_id: str = Query(...), rainfall_mm: float = Query(0.0, desc
             "risk_reduction": round(sim["risk_reduction"], 4),
             "note": "Simulated/illustrative — based on documented hand-tuned effect-size assumptions.",
         },
-        "current_state": {
-            "current_orders": int(row_dict["current_orders"]),
-            "available_riders": int(row_dict["available_riders"]),
-            "capacity_gap": round(float(row_dict["capacity_gap"]), 1),
-            "congestion_pct": round(float(row_dict["congestion_pct"]), 1),
-            "current_rainfall": round(float(row_dict["current_rainfall"]), 1),
-            "inventory_level": round(float(row_dict["inventory_level"]), 1),
-        },
+        "current_state": current_state_dict,
     }
 
 
@@ -239,6 +436,22 @@ def root():
 def list_zones():
     zones = test[["zone_id", "zone_name", "distance_tier"]].drop_duplicates().sort_values("zone_id")
     return zones.to_dict(orient="records")
+
+
+@app.get("/live_zones")
+def list_live_zones():
+    """
+    All zones available in LIVE mode — includes the original 10 trained
+    zones plus extended Chennai coverage. Extended zones are flagged
+    in_trained_set=False since the model wasn't specifically trained on
+    them (predictions for these use the model's general weather/traffic/
+    distance-tier logic without zone-specific calibration).
+    """
+    return [
+        {"zone_id": zid, "zone_name": p["name"], "distance_tier": p["tier"],
+         "in_trained_set": zid in ORIGINAL_TRAINED_ZONES}
+        for zid, p in ZONE_PROFILE.items()
+    ]
 
 
 @app.get("/snapshots")
@@ -291,15 +504,28 @@ def analyze(row_idx: int = Query(..., description="Row index from /snapshots")):
     # 4. SIMULATE
     sim = simulate_intervention(model, feature_row, decision["action"], FEATURE_COLS)
 
+    current_state_dict = {
+        "current_orders": int(row_data["current_orders"]),
+        "available_riders": int(row_data["available_riders"]),
+        "capacity_gap": round(float(row_data["capacity_gap"]), 1),
+        "congestion_pct": round(float(row_data["congestion_pct"]), 1),
+        "current_rainfall": round(float(row_data["current_rainfall"]), 1),
+        "inventory_level": round(float(row_data["inventory_level"]), 1),
+    }
+    prediction_dict = {
+        "risk_probability": round(predicted_prob, 4),
+        "risk_level": "high" if predicted_prob >= 0.7 else "moderate" if predicted_prob >= 0.3 else "low",
+    }
+    narrative = generate_narrative(row_data["zone_name"], row_data["timestamp"], current_state_dict,
+                                    prediction_dict, dominant_cause, decision, sim)
+
     return {
         "zone_id": row_data["zone_id"],
         "zone_name": row_data["zone_name"],
         "timestamp": row_data["timestamp"].isoformat(),
         "actual_disruption": bool(row_data["disruption_label"]),
-        "prediction": {
-            "risk_probability": round(predicted_prob, 4),
-            "risk_level": "high" if predicted_prob >= 0.7 else "moderate" if predicted_prob >= 0.3 else "low",
-        },
+        "prediction": prediction_dict,
+        "narrative": narrative,
         "explanation": explanation,
         "dominant_cause": dominant_cause,
         "recommendation": decision,
@@ -309,12 +535,5 @@ def analyze(row_idx: int = Query(..., description="Row index from /snapshots")):
             "risk_reduction": round(sim["risk_reduction"], 4),
             "note": "Simulated/illustrative — based on documented hand-tuned effect-size assumptions.",
         },
-        "current_state": {
-            "current_orders": int(row_data["current_orders"]),
-            "available_riders": int(row_data["available_riders"]),
-            "capacity_gap": round(float(row_data["capacity_gap"]), 1),
-            "congestion_pct": round(float(row_data["congestion_pct"]), 1),
-            "current_rainfall": round(float(row_data["current_rainfall"]), 1),
-            "inventory_level": round(float(row_data["inventory_level"]), 1),
-        },
+        "current_state": current_state_dict,
     }

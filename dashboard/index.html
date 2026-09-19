@@ -44,6 +44,31 @@
   .rain-input { margin-left: 12px; display: none; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
   .rain-input input { width: 55px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 6px; font-family: 'IBM Plex Mono', monospace; }
   .live-banner { background: rgba(58,198,217,0.08); border: 1px solid var(--accent); border-radius: 6px; padding: 10px 16px; font-size: 12px; color: var(--accent); margin-bottom: 16px; }
+  .narrative-panel {
+    background: linear-gradient(135deg, var(--panel) 0%, var(--panel-2) 100%);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin-bottom: 16px;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .narrative-panel .narrative-label {
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .narrative-panel .narrative-label::before {
+    content: "";
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
   header .status {
     margin-left: auto;
     font-size: 12px;
@@ -197,8 +222,11 @@
     <button class="mode-btn" id="btn-live" onclick="setMode('live')">Live (current hour)</button>
   </div>
   <div class="rain-input" id="rain-input">
-    <span>Rain (mm/hr):</span>
-    <input type="number" id="rain-value" value="0" min="0" max="80" onchange="if(currentZone) fetchLive(currentZone)">
+    <label style="display:flex;align-items:center;gap:5px;cursor:pointer;">
+      <input type="checkbox" id="rain-override-toggle" onchange="if(currentZone) fetchLive(currentZone)">
+      <span>Override rain (mm/hr):</span>
+    </label>
+    <input type="number" id="rain-value" value="0" min="0" max="80" onchange="if(currentZone && document.getElementById('rain-override-toggle').checked) fetchLive(currentZone)">
   </div>
   <span class="status"><span class="dot"></span><span id="conn-status">connecting...</span></span>
 </header>
@@ -207,6 +235,9 @@
   <aside class="sidebar">
     <h3>ZONES</h3>
     <div class="zone-list" id="zone-list"></div>
+    <div id="zone-legend" style="display:none;font-size:10px;color:var(--text-faint);margin:-14px 0 20px;">
+      <span style="color:var(--risk-mod);">●</span> outside model's original trained zone set
+    </div>
     <h3 id="snapshot-heading" style="display:none;">SAMPLE HOURS (TEST SET)</h3>
     <div class="snapshot-list" id="snapshot-list"></div>
   </aside>
@@ -230,16 +261,16 @@ function setMode(m) {
   document.getElementById("rain-input").style.display = m === "live" ? "flex" : "none";
   document.getElementById("snapshot-heading").style.display = m === "live" ? "none" : (currentZone ? "block" : "none");
   document.getElementById("snapshot-list").style.display = m === "live" ? "none" : "flex";
-  if (currentZone) {
-    if (m === "live") fetchLive(currentZone);
-    else selectZone(currentZone);
-  }
+  document.getElementById("main-content").innerHTML = `<div class="empty-state">Select a zone to view predicted disruption risk, explanation, and recommended action.</div>`;
+  currentZone = null;
+  loadZonesForMode();
 }
 
 async function fetchLive(zoneId) {
-  const rain = document.getElementById("rain-value").value || 0;
-  document.getElementById("main-content").innerHTML = `<div class="loading">Generating live snapshot for current hour...</div>`;
-  const res = await fetch(`${API_BASE}/live?zone_id=${zoneId}&rainfall_mm=${rain}`);
+  const overrideOn = document.getElementById("rain-override-toggle").checked;
+  const rainParam = overrideOn ? `&rainfall_mm=${document.getElementById("rain-value").value || 0}` : "";
+  document.getElementById("main-content").innerHTML = `<div class="loading">Fetching live conditions...</div>`;
+  const res = await fetch(`${API_BASE}/live?zone_id=${zoneId}${rainParam}`);
   const data = await res.json();
   renderAnalysis(data, true);
 }
@@ -255,11 +286,19 @@ async function init() {
   }
 }
 
+async function loadZonesForMode() {
+  const endpoint = mode === "live" ? "live_zones" : "zones";
+  const res = await fetch(`${API_BASE}/${endpoint}`);
+  const zones = await res.json();
+  document.getElementById("zone-legend").style.display = mode === "live" ? "block" : "none";
+  renderZoneList(zones);
+}
+
 function renderZoneList(zones) {
   const el = document.getElementById("zone-list");
   el.innerHTML = zones.map(z => `
     <div class="zone-item" data-zone="${z.zone_id}" onclick="selectZone('${z.zone_id}')">
-      <span>${z.zone_name}</span>
+      <span>${z.zone_name}${z.in_trained_set === false ? ' <span style="color:var(--risk-mod);font-size:9px;">●</span>' : ''}</span>
       <span class="tier">${z.distance_tier}</span>
     </div>
   `).join("");
@@ -346,7 +385,11 @@ function renderAnalysis(d, isLive) {
   const showSim = s.risk_before !== s.risk_after;
 
   document.getElementById("main-content").innerHTML = `
-    ${isLive ? `<div class="live-banner">● LIVE MODE — generated for the current hour (${dtLabel}) using the same causal model as the training data. No real live weather/traffic/order feed is connected; adjust rainfall above to test scenarios.</div>` : ''}
+    ${isLive ? `<div class="live-banner">● LIVE MODE — ${d.disclaimer}</div>` : ''}
+    <div class="narrative-panel">
+      <div class="narrative-label">PLAIN-LANGUAGE SUMMARY</div>
+      ${d.narrative}
+    </div>
     <div class="grid-top">
       <div class="panel">
         <h2>PREDICTED DISRUPTION RISK — NEXT HOUR</h2>
